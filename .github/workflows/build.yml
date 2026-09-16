@@ -34,7 +34,7 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --noconsole --onefile --collect-all gradio --collect-all sklearn --collect-all matplotlib --collect-all safehttpx app.py
+        pyinstaller --noconsole --onefile --collect-all gradio --collect-all sklearn --collect-all matplotlib --collect-all safehttpx --collect-all groovy app.py
     - name: Upload Executable
       uses: actions/upload-artifact@v4
       with:
