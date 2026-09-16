@@ -1,6 +1,6 @@
 # Industrial Multi-Objective Experimental Design & Optimization Toolkit
 
-A robust Python-based engineering system tailored for R&D and production environments. It bridges traditional space-filling experimental design with advanced machine learning regression to handle complex, multi-objective process optimization challenges.
+A robust Python-based engineering system tailored for R&D and production environments. It bridges traditional space-filling experimental design with regression to handle complex, multi-objective process optimization challenges.
 
 ## Key Features
 
