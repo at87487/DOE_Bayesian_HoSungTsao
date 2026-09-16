@@ -566,4 +566,4 @@ with gr.Blocks(title="DOE System", theme=gr.themes.Soft()) as demo:
     feed_back_btn.click(feed_back_suggestions_to_matrix, inputs=[matrix_df, suggestion_output_df, specs_input], outputs=[matrix_df, status_output])
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(inbrowser=True, server_port=7861)
