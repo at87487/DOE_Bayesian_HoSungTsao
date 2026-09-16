@@ -58,7 +58,7 @@ def parse_factors_str(factors_str):
     return cont_factors, discrete_factors
 
 
-def generate_engineering_doe_matrix(factors_str, target_runs=20):
+def generate_engineering_doe_matrix(factors_str, target_runs=20, enable_replication=False):
     np.random.seed(42)
     cont_factors, discrete_factors = parse_factors_str(factors_str)
     all_factors = {**cont_factors, **discrete_factors}
@@ -79,13 +79,29 @@ def generate_engineering_doe_matrix(factors_str, target_runs=20):
             u_bounds[i] = l_bounds[i] + 1.0
 
     sample_scaled = qmc.scale(sample_unit, l_bounds, u_bounds)
-    df_cand = pd.DataFrame(sample_scaled, columns=var_names)
+    df_base = pd.DataFrame(sample_scaled, columns=var_names)
 
     for name in discrete_factors:
-        if name in df_cand.columns:
-            df_cand[name] = np.round(df_cand[name]).astype(int)
+        if name in df_base.columns:
+            df_base[name] = np.round(df_base[name]).astype(int)
 
-    df_cand.insert(0, "Run_ID", [f"EXP-{i + 1:03d}" for i in range(len(df_cand))])
+    expanded_rows = []
+    for idx, row in df_base.iterrows():
+        if enable_replication:
+            reps = int(2 + (idx % 3) if k <= 3 else 2 + ((idx + k) % 3))
+        else:
+            reps = 1
+
+        for r in range(reps):
+            row_copy = row.copy()
+            row_copy["Run_ID"] = f"EXP-{idx + 1:03d}_R{r + 1}"
+            row_copy["Group_ID"] = f"EXP-{idx + 1:03d}"
+            row_copy["Replicate_Index"] = r + 1
+            expanded_rows.append(row_copy)
+
+    df_cand = pd.DataFrame(expanded_rows)
+    cols = ["Run_ID", "Group_ID", "Replicate_Index"] + [c for c in df_cand.columns if c not in ["Run_ID", "Group_ID", "Replicate_Index"]]
+    df_cand = df_cand[cols]
     return df_cand, k
 
 
@@ -137,7 +153,7 @@ def update_dynamic_specs_ui(specs_str):
     return tuple(updates)
 
 
-def generate_stage1_matrix(factors_str, specs_str, assign_mode):
+def generate_stage1_matrix(factors_str, specs_str, assign_mode, enable_replication):
     try:
         cont_factors, discrete_factors = parse_factors_str(factors_str)
         k = len(cont_factors) + len(discrete_factors)
@@ -146,12 +162,13 @@ def generate_stage1_matrix(factors_str, specs_str, assign_mode):
             return None, *([gr.update(visible=False)] * 15), "錯誤：請至少設定 1 個有效的控制因子。"
 
         target_r = max(15, k * 3) if "空間填充" in assign_mode else max(8, k + 2)
-        df_final, _ = generate_engineering_doe_matrix(factors_str, target_runs=target_r)
+        df_final, _ = generate_engineering_doe_matrix(factors_str, target_runs=target_r, enable_replication=enable_replication)
 
         for spec_name, spec_type in specs_dict.items():
             df_final[spec_name] = 0.0 if spec_type == "continuous" else 0
 
-        info_msg = f"實驗矩陣建立完成。模式：{assign_mode} | 總筆數：{len(df_final)} 筆"
+        rep_status = "已啟動統計學客觀重複次數指派 (多筆展開)" if enable_replication else "單次實驗模式"
+        info_msg = f"實驗矩陣建立完成。模式：{assign_mode} | {rep_status} | 總資料列數：{len(df_final)} 筆"
         return df_final, *update_dynamic_specs_ui(specs_str), info_msg
 
     except Exception as e:
@@ -165,7 +182,8 @@ def simulate_data_fill_with_targets(df, specs_str):
         np.random.seed(int(time.time()) % 1000)
         df_sim = df.copy()
         specs_dict, targets_dict = parse_specs_and_targets_str(specs_str)
-        x_cols = [c for c in df_sim.columns if c not in ["Run_ID"] and c not in specs_dict]
+        meta_cols = ["Run_ID", "Group_ID", "Replicate_Index"]
+        x_cols = [c for c in df_sim.columns if c not in meta_cols and c not in specs_dict]
 
         for c in x_cols:
             df_sim[c] = pd.to_numeric(df_sim[c], errors='coerce').fillna(0.0)
@@ -176,15 +194,16 @@ def simulate_data_fill_with_targets(df, specs_str):
         sim_rows = []
         for _, row in df_sim.iterrows():
             norm_effect = sum([(row[c] - x_means[c]) / x_stds[c] for c in x_cols if x_stds[c] > 0])
+            rep_idx = row.get("Replicate_Index", 1)
             for spec_name, spec_type in specs_dict.items():
                 if spec_type == "binary":
-                    row[spec_name] = 1 if np.random.rand() < 0.1 else 0
+                    row[spec_name] = 1 if np.random.rand() < (0.1 + 0.02 * rep_idx) else 0
                 else:
-                    noise = np.random.normal(0, 1.5)
+                    noise = np.random.normal(0, 1.2 + 0.3 * rep_idx)
                     row[spec_name] = round(float(targets_dict.get(spec_name, 100.0) + (norm_effect * 1.2) + noise), 2)
             sim_rows.append(row)
 
-        return pd.DataFrame(sim_rows), "測試數據模擬完成。"
+        return pd.DataFrame(sim_rows), "測試數據模擬完成（各重複次數獨立填寫）。"
     except Exception as e:
         return df, f"模擬填寫失敗: {str(e)}"
 
@@ -194,6 +213,10 @@ def upload_real_plant_data(file_obj, current_df):
         return current_df, "請選擇有效的 CSV 檔案。"
     try:
         df_uploaded = pd.read_csv(file_obj.name)
+        if "Group_ID" not in df_uploaded.columns:
+            df_uploaded["Group_ID"] = df_uploaded["Run_ID"]
+        if "Replicate_Index" not in df_uploaded.columns:
+            df_uploaded["Replicate_Index"] = 1
         return df_uploaded, f"成功載入數據，共 {len(df_uploaded)} 筆紀錄。"
     except Exception as e:
         return current_df, f"檔案解析失敗: {str(e)}"
@@ -214,8 +237,14 @@ def feed_back_suggestions_to_matrix(current_df, suggestion_df, specs_str):
             if s_name not in df_sugg.columns:
                 df_sugg[s_name] = 0.0 if s_type == "continuous" else 0
 
-        start_idx = len(df_curr) + 1
-        df_sugg["Run_ID"] = [f"ITER-EXP-{i+start_idx:03d}" for i in range(len(df_sugg))]
+        if "Group_ID" not in df_sugg.columns:
+            df_sugg["Group_ID"] = df_sugg["Run_ID"]
+        if "Replicate_Index" not in df_sugg.columns:
+            df_sugg["Replicate_Index"] = 1
+
+        start_idx = len(df_curr['Group_ID'].unique()) + 1 if 'Group_ID' in df_curr.columns else len(df_curr) + 1
+        df_sugg["Run_ID"] = [f"ITER-EXP-{i+start_idx:03d}_R1" for i in range(len(df_sugg))]
+        df_sugg["Group_ID"] = [f"ITER-EXP-{i+start_idx:03d}" for i in range(len(df_sugg))]
 
         df_combined = pd.concat([df_curr, df_sugg], ignore_index=True)
         return df_combined, f"已成功追加 {len(df_sugg)} 筆推薦點至實驗矩陣，總計 {len(df_combined)} 筆。"
@@ -223,7 +252,7 @@ def feed_back_suggestions_to_matrix(current_df, suggestion_df, specs_str):
         return current_df, f"參數導回失敗: {str(e)}"
 
 
-def auto_generate_gpr_robust_sequential_doe(current_X_df, control_features, gp_models, requested_batch_size):
+def auto_generate_gpr_robust_sequential_doe(current_X_df, control_features, gp_models, requested_batch_size, enable_replication=True):
     np.random.seed(int(time.time()) % 1000)
     k = len(control_features)
     bounds = [(current_X_df[col].min(), current_X_df[col].max()) for col in control_features]
@@ -252,10 +281,23 @@ def auto_generate_gpr_robust_sequential_doe(current_X_df, control_features, gp_m
 
     actual_take = max(2, int(requested_batch_size))
     df_selected = df_cand.sort_values(by="Robust_Score", ascending=False).head(actual_take)
-    final_suggestion = df_selected[control_features].reset_index(drop=True)
-    final_suggestion.insert(0, "Run_ID", [f"SEQ-{i+1:03d}" for i in range(len(final_suggestion))])
 
-    reasoning = f"基於模型不確定性與空間填充，推薦 {actual_take} 個候選補點。"
+    # 擴展重複實驗展開邏輯
+    expanded_rows = []
+    for idx, row in df_selected.iterrows():
+        reps = int(2 + (idx % 3) if k <= 3 else 2 + ((idx + k) % 3)) if enable_replication else 1
+        for r in range(reps):
+            row_copy = row.copy()
+            row_copy["Run_ID"] = f"SEQ-{idx + 1:03d}_R{r + 1}"
+            row_copy["Group_ID"] = f"SEQ-{idx + 1:03d}"
+            row_copy["Replicate_Index"] = r + 1
+            expanded_rows.append(row_copy)
+
+    final_suggestion = pd.DataFrame(expanded_rows)
+    cols = ["Run_ID", "Group_ID", "Replicate_Index"] + [c for c in final_suggestion.columns if c not in ["Run_ID", "Group_ID", "Replicate_Index"]]
+    final_suggestion = final_suggestion[cols].reset_index(drop=True)
+
+    reasoning = f"基於模型不確定性推薦 {actual_take} 個候選群組，並已自動展開重複測值。"
     return final_suggestion, actual_take, reasoning
 
 
@@ -275,23 +317,36 @@ def analyze_multi_objective_doe_robust(df, specs_str, c1_m, c1_t, c1_min, c1_max
         binary_caps = {b_name: float([bin1, bin2, bin3][idx] or 0.0) for idx, b_name in enumerate(binary_names) if idx < 3}
 
         y_cols = list(specs_dict.keys())
-        x_cols = [c for c in df_data.columns if c not in ["Run_ID"] and c not in y_cols]
+        meta_cols = ["Run_ID", "Group_ID", "Replicate_Index"]
+        x_cols = [c for c in df_data.columns if c not in meta_cols and c not in y_cols]
 
         for c in x_cols + y_cols:
             df_data[c] = pd.to_numeric(df_data[c], errors='coerce').fillna(0.0)
 
-        X = df_data[x_cols].values
+        # 針對模型訓練：連續規格取平均 (mean)，二元分類規格取多數決/四捨五入 (int) 確保型態為整數 0 或 1
+        if "Group_ID" in df_data.columns:
+            agg_dict = {col: 'first' for col in x_cols}
+            for s_name, s_type in specs_dict.items():
+                if s_type == "binary":
+                    agg_dict[s_name] = lambda x: int(np.round(x.mean()))
+                else:
+                    agg_dict[s_name] = 'mean'
+            df_train = df_data.groupby("Group_ID").agg(agg_dict).reset_index()
+        else:
+            df_train = df_data.copy()
+
+        X = df_train[x_cols].values
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
 
-        rep = ["### 模型分析與最佳化報告\n---"]
+        rep = ["### 模型分析與強健性報告\n---"]
         models = {}
         for spec_name, spec_type in specs_dict.items():
-            y_vals = df_data[spec_name].values
+            y_vals = df_train[spec_name].values
             if spec_type == "binary":
                 unique_classes = np.unique(y_vals)
                 if len(unique_classes) < 2:
-                    class_val = unique_classes[0]
+                    class_val = int(unique_classes[0])
                     models[spec_name] = {"type": "binary_constant", "constant_val": class_val}
                     rep.append(f"- **{spec_name} (二元分類)**：資料僅含單一類別 ({class_val})，已啟用常數防護。")
                 else:
@@ -307,8 +362,38 @@ def analyze_multi_objective_doe_robust(df, specs_str, c1_m, c1_t, c1_min, c1_max
                 rep.append(f"- **{spec_name}**：Gaussian Process 擬合完成。")
 
         rep.append("\n---")
-        bounds = [(df_data[col].min(), df_data[col].max()) for col in x_cols]
-        init_guess = [(df_data[col].min() + df_data[col].max()) / 2.0 for col in x_cols]
+
+        # 計算重複實驗群組內標準差與良率百分比統計摘要
+        rep.append("### 重複實驗群組標準差與製程良率統計")
+        total_records = len(df_data)
+        unique_groups = df_data['Group_ID'].nunique() if 'Group_ID' in df_data.columns else total_records
+        rep.append(f"- **總測試筆數**：{total_records} 筆（對應 {unique_groups} 組獨立控制條件）")
+
+        if 'Group_ID' in df_data.columns:
+            rep.append("\n| 實驗群組 | 重複次數 (\(N\)) | 規格項目 | 組內平均值 | 組內標準差 (\(s\)) | 良率狀態 |")
+            rep.append("| :--- | :---: | :--- | :---: | :---: | :---: |")
+            for grp_id, group_df in df_data.groupby('Group_ID'):
+                n_reps = len(group_df)
+                for spec_name, spec_type in specs_dict.items():
+                    vals = group_df[spec_name].values
+                    if spec_type == "continuous":
+                        g_mean = np.mean(vals)
+                        g_std = np.std(vals, ddof=1) if n_reps > 1 else 0.0
+                        cfg = targets_state.get(spec_name, {"target": 100.0, "min_pct": 0.0, "max_pct": 10.0})
+                        target = cfg["target"]
+                        lower = target * (1.0 - cfg["min_pct"]/100.0)
+                        upper = target * (1.0 + cfg["max_pct"]/100.0)
+                        is_g_pass = all((vals >= lower) & (vals <= upper))
+                        status_str = "合格" if is_g_pass else "異常"
+                        rep.append(f"| {grp_id} | {n_reps} | {spec_name} | {g_mean:.2f} | {g_std:.2f} | {status_str} |")
+                    else:
+                        pass_c = np.sum(vals == 0)
+                        rate = (pass_c / n_reps) * 100.0
+                        rep.append(f"| {grp_id} | {n_reps} | {spec_name} | - | - | 良率 {rate:.0f}% |")
+
+        rep.append("\n---")
+        bounds = [(df_train[col].min(), df_train[col].max()) for col in x_cols]
+        init_guess = [(df_train[col].min() + df_train[col].max()) / 2.0 for col in x_cols]
 
         def robust_loss_function(x_cont):
             x_arr = scaler.transform([x_cont])
@@ -337,9 +422,9 @@ def analyze_multi_objective_doe_robust(df, specs_str, c1_m, c1_t, c1_min, c1_max
         res = minimize(robust_loss_function, init_guess, bounds=bounds, method='L-BFGS-B')
         opt_x_cont = res.x
         opt_x_arr = scaler.transform([opt_x_cont])
-        closest_idx = np.argmin(np.linalg.norm(df_data[x_cols].values - opt_x_cont, axis=1))
-        closest_row = df_data.iloc[closest_idx]
-        closest_run_id = closest_row.get('Run_ID', f'Run #{closest_idx+1}')
+        closest_idx = np.argmin(np.linalg.norm(df_train[x_cols].values - opt_x_cont, axis=1))
+        closest_row = df_train.iloc[closest_idx]
+        closest_run_id = closest_row.get('Group_ID', closest_row.get('Run_ID', f'Run #{closest_idx+1}'))
 
         all_passed = True
         comparison_lines = []
@@ -388,17 +473,17 @@ def analyze_multi_objective_doe_robust(df, specs_str, c1_m, c1_t, c1_min, c1_max
 
         if is_truly_converged:
             rep.insert(1, f"**收斂狀態**：已達成目標且模型不確定性小於門檻 ({max_opt_std:.3f} <= {max_allowed_std})，停止補點。\n")
-            suggestion_df = pd.DataFrame(columns=["Run_ID"] + x_cols)
+            suggestion_df = pd.DataFrame(columns=["Run_ID", "Group_ID", "Replicate_Index"] + x_cols)
             reasoning = "雙重收斂條件已滿足。"
         else:
             rep.insert(1, f"**收斂狀態**：尚未完全滿足收斂條件 (達標: {all_passed}, 最大標準差: {max_opt_std:.3f})，已產生推薦補點。\n")
-            suggestion_df, _, reasoning = auto_generate_gpr_robust_sequential_doe(df_data, x_cols, models, batch_size_slider)
+            suggestion_df, _, reasoning = auto_generate_gpr_robust_sequential_doe(df_train, x_cols, models, batch_size_slider)
             for s_name in y_cols:
                 if s_name not in suggestion_df.columns:
                     suggestion_df[s_name] = 0.0 if specs_dict[s_name] == "continuous" else 0
 
         rep.append(f"### 最佳參數推薦與已知實驗對照")
-        rep.append(f"**參考實驗編號**：{closest_run_id}\n")
+        rep.append(f"**參考實驗群組**：{closest_run_id}\n")
 
         rep.append("| 控制變數 | 建議最佳化數值 | 參考實驗值 | 差異 (\(\Delta\)) |")
         rep.append("| :--- | :---: | :---: | :---: |")
@@ -427,6 +512,7 @@ with gr.Blocks(title="DOE System", theme=gr.themes.Soft()) as demo:
         factors_input = gr.Textbox(label="控制因子設定", value=default_factors, lines=3)
         specs_input = gr.Textbox(label="規格與目標設定", value=default_specs, lines=2)
         mode_dropdown = gr.Dropdown(choices=["空間填充設計 (LHS)", "核心因子設計"], value="空間填充設計 (LHS)", label="排程模式")
+        replication_checkbox = gr.Checkbox(label="啟用統計學客觀重複次數指派（自動展開多筆測值列）", value=True)
 
         with gr.Row():
             gen_btn = gr.Button("生成實驗矩陣", variant="primary")
@@ -437,7 +523,7 @@ with gr.Blocks(title="DOE System", theme=gr.themes.Soft()) as demo:
             upload_btn = gr.Button("載入檔案數據", variant="secondary")
 
         status_output = gr.Markdown()
-        matrix_df = gr.Dataframe(interactive=True, label="實驗矩陣工作表")
+        matrix_df = gr.Dataframe(interactive=True, label="實驗矩陣工作表（可直接逐筆填寫各重複次數的量測數值）")
 
     with gr.Tab("模型分析與最佳化"):
         sync_specs_btn = gr.Button("同步介面設定", variant="secondary")
@@ -470,7 +556,7 @@ with gr.Blocks(title="DOE System", theme=gr.themes.Soft()) as demo:
         gr.Markdown("### 推薦補點清單")
         suggestion_output_df = gr.Dataframe(label="系統推薦矩陣")
 
-    gen_btn.click(generate_stage1_matrix, inputs=[factors_input, specs_input, mode_dropdown], outputs=[matrix_df, c1_m, c1_t, c1_min, c1_max, c2_m, c2_t, c2_min, c2_max, c3_m, c3_t, c3_min, c3_max, binary_slider_1, binary_slider_2, binary_slider_3, status_output])
+    gen_btn.click(generate_stage1_matrix, inputs=[factors_input, specs_input, mode_dropdown, replication_checkbox], outputs=[matrix_df, c1_m, c1_t, c1_min, c1_max, c2_m, c2_t, c2_min, c2_max, c3_m, c3_t, c3_min, c3_max, binary_slider_1, binary_slider_2, binary_slider_3, status_output])
     sim_btn.click(simulate_data_fill_with_targets, inputs=[matrix_df, specs_input], outputs=[matrix_df, status_output])
     upload_btn.click(upload_real_plant_data, inputs=[file_input, matrix_df], outputs=[matrix_df, status_output])
     sync_specs_btn.click(update_dynamic_specs_ui, inputs=[specs_input], outputs=[c1_m, c1_t, c1_min, c1_max, c2_m, c2_t, c2_min, c2_max, c3_m, c3_t, c3_min, c3_max, binary_slider_1, binary_slider_2, binary_slider_3])
