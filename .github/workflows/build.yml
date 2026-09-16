@@ -1,4 +1,4 @@
-name: Build Windows Executable
+name: Build Cross-Platform App
 
 on:
   push:
@@ -6,7 +6,17 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: Windows-App-EXE
+            file_extension: .exe
+          - os: macos-latest
+            artifact_name: macOS-App-Binary
+            file_extension: ""
 
     steps:
     - name: Checkout repository
@@ -26,8 +36,8 @@ jobs:
       run: |
         pyinstaller --noconsole --onefile --collect-all gradio --collect-all sklearn --collect-all matplotlib app.py
 
-    - name: Upload Windows Executable
+    - name: Upload Executable
       uses: actions/upload-artifact@v4
       with:
-        name: Windows-App-EXE
-        path: dist/*.exe
+        name: ${{ matrix.artifact_name }}
+        path: dist/*${{ matrix.file_extension }}
